@@ -22,30 +22,28 @@ A robust Python-based tool for migrating knowledge articles from Freshdesk to Mi
 
 ## Required Python Packages
 
+- requests
+- msal
+- azure-identity
+- azure-keyvault-secrets
+- beautifulsoup4
+
 ```bash
-pip install requests msal azure-identity azure-keyvault-secrets beautifulsoup4 pandas
+pip install requests msal azure-identity azure-keyvault-secrets beautifulsoup4
 ```
 
 ## Configuration
 
-1. Create a `parameters.json` file with your Freshdesk API credentials:
-```json
-{
-    "freshdesk_api": "your_api_key_here"
-}
-```
-
-2. Set up environment variables in `variables.py`:
+1. Set up Dataverse variables in `variables.py`:
 ```python
 KEY_VAULT_NAME = "your_keyvault_name"
 KEY_VAULT_URI = "your_keyvault_uri"
 client_id = "your_client_id"
 authority = "your_authority_url"
-scope_dev = ["your_dev_scope"]
-scope_staging = ["your_staging_scope"]
+scope = ["your_scope"]
 ```
 
-3. Ensure you have appropriate Azure Key Vault access configured with the secret replacing "SECRET_NAME".
+2 Ensure you have appropriate Azure Key Vault access configured with the secret replacing "SECRET_NAME".
 
 ## Directory Structure
 

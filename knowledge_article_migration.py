@@ -13,15 +13,13 @@ import base64
 from azure.identity import DefaultAzureCredential
 from azure.keyvault.secrets import SecretClient
 import variables
-import pandas as pd
 from bs4 import BeautifulSoup
 import csv
 import json
 from jsonschema import Draft7Validator
 import pprint
 from datetime import datetime, timezone
-from imported_categories_dev_env import imported_categories as imported_categories
-
+from icecream import ic
 
 # Create and configure logger
 LOG_FORMAT = "%(levelname)s %(asctime)s - %(message)s"
@@ -37,23 +35,15 @@ def get_utc_datetime():
     return utc_datetime.strftime("%Y%m%d%H%M%S")
 
 
-# Get Freshdesk API
-with open("./parameters.json") as file:
-    parameters = json.load(file)
-
-freshdesk_api_key = parameters["freshdesk_api"]
+# Freshdesk API
+freshdesk_api_key = FRESHDESK_API_KEY
 freshdesk_url = FRESHDESK_URL
 
 
 # Dataverse API
 
-# Dev
-# dynamics_url = DYNAMICS_DEV_ENV_URL
-# scope = variables.scope_dev
-
-# Staging
-dynamics_url = DYNAMICS_STAGING_ENV_URL
-scope = variables.scope_staging
+dynamics_url = DYNAMICS_URL
+scope = variables.scope
 
 # Get secret from keyvault
 key_vault_name = variables.KEY_VAULT_NAME
@@ -77,22 +67,32 @@ token_response = app.acquire_token_for_client(scopes=scope)
 
 # Freshdesk GET function
 def freshdesk_get(url):
+    global freshdesk_get_response
     headers = {
         "content-type": "application/json"
     }
 
-    req = requests.get(
+    freshdesk_get_response = requests.get(
         url=url,
         auth=HTTPBasicAuth(freshdesk_api_key, ""),
         headers=headers
     )
 
-    repo = req.json()
+    repo = freshdesk_get_response.json()
 
-    if req.status_code == 200:
+    if freshdesk_get_response.status_code == 200:
+        while "next" in freshdesk_get_response.links.keys():
+            freshdesk_get_response = requests.get(
+                freshdesk_get_response.links["next"]["url"],
+                auth=HTTPBasicAuth(freshdesk_api_key, ""),
+                headers=headers
+            )
+            repo.extend(freshdesk_get_response.json())
+            ic(f"{freshdesk_get_response.links}")
         return repo
     else:
-        print(req.status_code)
+        logger.error(freshdesk_get_response.status_code)
+        ic(freshdesk_get_response.status_code)
 
 
 # Get images function
@@ -177,6 +177,72 @@ def get_images(article):
             logger.warning(f"Failed to migrate image {image_name}")
 
 
+# Add categories to Dynamics function
+
+def import_categories_to_dynamics(category_set):
+    global imported_categories, dynamics_categories_dict, dynamics_url, kb_folders
+
+    imported_categories = {}
+
+    if "access_token" in token_response:
+        access_token = token_response["access_token"]
+
+        headers = {
+            "Authorization": f"Bearer {access_token}",
+            "Content-Type": "application/json",
+            "Prefer": "return=representation",
+            'OData-MaxVersion': '4.0',
+            'OData-Version': '4.0'
+        }
+
+        for category in category_set:
+            category_name = category["name"]
+            category_description = category["description"]
+            freshdesk_category_id = category["id"]
+            if "parent_folder_id" not in category:
+                category_data = {
+                    "title": category_name,
+                    "description": category_description,
+                    "revops_freshdeskcategoryid": freshdesk_category_id
+                }
+
+            elif "parent_folder_id" in category:
+                parent_category_id = category["parent_folder_id"]
+                category_data = {
+                    "title": category_name,
+                    "description": category_description,
+                    "revops_freshdeskcategoryid": freshdesk_category_id,
+                    "parentcategoryid@odata.bind": f'/categories({imported_categories[parent_category_id]["categoryid"]})'
+                }
+
+            categories_url = f"{dynamics_url}api/data/v9.2/categories"
+            categories_response = requests.post(
+                categories_url, headers=headers, data=json.dumps(category_data))
+            categories_response.raise_for_status()
+
+            if categories_response.status_code in [201, 204]:
+                print("Category added successfully!")
+                imported_category = {}
+                freshdesk_id = category["id"]
+                imported_category["categoryid"] = categories_response.json()[
+                    "categoryid"]
+                imported_category["title"] = categories_response.json()[
+                    "title"]
+                imported_categories.update({freshdesk_id: imported_category})
+            else:
+                logger.warning(f"Failed to create category {category_name}.")
+                print(
+                    f"Failed to create category. Status code: {categories_response.status_code}")
+
+            try:
+                print(categories_response.json())
+            except json.JSONDecodeError:
+                print("No JSON response body.")
+
+    else:
+        print("Failed to acquire access token.")
+
+
 # Update knowledgearticle_category function
 
 def update_category(article_id, category_id):
@@ -254,15 +320,16 @@ with open(csv_file, "w", newline="") as freshdesk_folders:
     writer.writerows(kb_folders)
 
 
+# Get categories from Dynamics
+
+global dynamics_categories_dict
+
 # Acquire access token
 app = msal.ConfidentialClientApplication(
-    client_id,
-    authority=authority,
-    client_credential=secret.value
-)
+    client_id, authority=authority, client_credential=secret.value)
 token_response = app.acquire_token_for_client(scopes=scope)
 
-dynamics_categories_url = f"{dynamics_url}categories"
+dynamics_categories_url = f"{dynamics_url}api/data/v9.2/categories"
 
 if "access_token" in token_response:
     access_token = token_response["access_token"]
@@ -277,9 +344,7 @@ if "access_token" in token_response:
     }
 
     dynamics_categories_response = requests.get(
-        dynamics_categories_url,
-        headers=headers
-    )
+        dynamics_categories_url, headers=headers)
 
     if dynamics_categories_response.status_code == 200:
         dynamics_categories = [item for item in dynamics_categories_response.json()[
@@ -295,8 +360,12 @@ if "access_token" in token_response:
                 "category_number": item["categorynumber"]
             }})
 
+        print(dynamics_categories_dict)
+
     else:
         logger.warning(f"Failed to get categories.")
+        print(
+            f"Failed to get categories. Status code: {dynamics_categories_response.status_code}")
 
 
 # Save categories
@@ -309,68 +378,27 @@ with open(f"./data/imported_categories_{dyn_category_query_datetime}_{env}_env.j
 
 # Add categories to dynamics
 
-import_categories = input("Do you need to import Freshdesk categories? ")
-if import_categories.lower() == "y":
-    imported_categories = {}
-
-    if "access_token" in token_response:
-        access_token = token_response["access_token"]
-
-        headers = {
-            "Authorization": f"Bearer {access_token}",
-            "Content-Type": "application/json",
-            "Prefer": "return=representation",
-            'OData-MaxVersion': '4.0',
-            'OData-Version': '4.0'
-        }
-
-        for category in kb_folders:
-            category_name = category["name"]
-            category_description = category["description"]
-            freshdesk_category_id = category["id"]
-            if "parent_folder_id" not in category:
-                category_data = {
-                    "title": category_name,
-                    "description": category_description,
-                    "revops_freshdeskcategoryid": freshdesk_category_id
-                }
-
-            elif "parent_folder_id" in category:
-                parent_category_id = category["parent_folder_id"]
-                category_data = {
-                    "title": category_name,
-                    "description": category_description,
-                    "revops_freshdeskcategoryid": freshdesk_category_id,
-                    "parentcategoryid@odata.bind": f'/categories({imported_categories[parent_category_id]["categoryid"]})'
-                }
-
-            categories_url = f"{dynamics_url}categories"
-            categories_response = requests.post(
-                categories_url, headers=headers, data=json.dumps(category_data))
-            categories_response.raise_for_status()
-
-            if categories_response.status_code in [201, 204]:
-                imported_category = {}
-                freshdesk_id = category["id"]
-                imported_category["categoryid"] = categories_response.json()[
-                    "categoryid"]
-                imported_category["title"] = categories_response.json()[
-                    "title"]
-                imported_categories.update({freshdesk_id: imported_category})
-            else:
-                logger.warning(f"Failed to create category {category_name}.")
-
-            try:
-                print(categories_response.json())
-            except json.JSONDecodeError:
-                print("No JSON response body.")
-
-    else:
-        print("Failed to acquire access token.")
+import_categories_prompt = input("Import Freshdesk categories? ")
+if import_categories_prompt.lower() == "y":
+    import_categories_to_dynamics(categories)
+    import_categories_to_dynamics(kb_folders)
 
 else:
     print("No categories were added.")
     imported_categories = dynamics_categories_dict
+
+
+# Check for missing folders
+
+missing_folders = []
+
+for folder in kb_folders:
+    if folder["id"] not in imported_categories:
+        missing_folders.append(folder["id"])
+
+if missing_folders:
+    ic(missing_folders)
+    sys.exit("Missing folders in Dynamics")
 
 
 # Get articles from Freshdesk and save locally
